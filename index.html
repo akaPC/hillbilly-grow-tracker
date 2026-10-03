@@ -612,6 +612,7 @@
       <span class="sync-dot"></span>
       <span id="syncLabel">Connecting</span>
     </div>
+    <button class="btn ghost sm" id="signOutBtn" style="display:none;">Sign out</button>
   </div>
   <nav class="tabs" id="tabs">
     <button class="tab active" data-view="dashboard">
@@ -640,6 +641,18 @@
     </button>
   </nav>
 </header>
+
+<section id="authGate" style="display:none; padding: 0 18px;">
+  <div class="panel" style="max-width: 420px; margin: 60px auto;">
+    <div class="panel-h"><h3>Sign in</h3></div>
+    <form id="authForm">
+      <div class="field"><label for="authEmail">Email</label><input type="email" id="authEmail" autocomplete="username" required></div>
+      <div class="field"><label for="authPassword">Password</label><input type="password" id="authPassword" autocomplete="current-password" required></div>
+      <button class="btn primary" type="submit" id="authSubmit">Sign in</button>
+      <p class="muted" id="authMsg" style="font-size:12px; margin: 12px 0 0;"></p>
+    </form>
+  </div>
+</section>
 
 <main>
 
@@ -1118,7 +1131,8 @@
 <script>
 /* =====================================================================
    CONFIG — fill in from Supabase Project Settings -> API.
-   This is a personal tool. anon key is intentionally public-readable.
+   The anon key is safe to publish: schema.sql only grants access to
+   signed-in users whose email is in public.allowed_emails.
 ===================================================================== */
 const SUPABASE_URL      = "https://ouaiwmepisqpqvegesna.supabase.co";
 const SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im91YWl3bWVwaXNxcHF2ZWdlc25hIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzczNDI3NDAsImV4cCI6MjA5MjkxODc0MH0._kViAbU4OxdnY37tu108bANWS16rfg4bdBqwCoHChI0";
@@ -1329,6 +1343,11 @@ async function loadAll() {
     }
   }
   state.tubs.sort((a,b) => a.tub_number - b.tub_number);
+  if (!state.tubs.length) {
+    gateMsg = "This account doesn't have access. Check that its email is in allowed_emails and that the current schema.sql has been run.";
+    await sb.auth.signOut();
+    return false;
+  }
 
   setSync("online");
   state.initialized = true;
@@ -1344,11 +1363,12 @@ function showSetupRequired(detail) {
       <ol style="line-height: 1.8;">
         <li>Open your Supabase project → <b>SQL Editor</b> → <b>New query</b>.</li>
         <li>Paste the entire contents of
-          <a href="https://github.com/Michaelcoley/hillbilly-grow-tracker/blob/main/schema.sql" target="_blank" rel="noopener">schema.sql</a>
+          <a href="https://github.com/akaPC/hillbilly-grow-tracker/blob/main/schema.sql" target="_blank" rel="noopener">schema.sql</a>
           (also viewable
-          <a href="https://raw.githubusercontent.com/Michaelcoley/hillbilly-grow-tracker/main/schema.sql" target="_blank" rel="noopener">raw here</a>).
+          <a href="https://raw.githubusercontent.com/akaPC/hillbilly-grow-tracker/main/schema.sql" target="_blank" rel="noopener">raw here</a>).
         </li>
         <li>Click <b>Run</b>. The script creates 5 tables, RLS policies, the realtime publication, the <code>grow-photos</code> storage bucket, and seeds 3 tub rows.</li>
+        <li>Add your email to <code>allowed_emails</code> (see the README, step 3).</li>
         <li>Reload this page.</li>
       </ol>
       <hr class="hr"/>
@@ -1457,8 +1477,38 @@ async function uploadPhoto(file, prefix = "obs") {
     cacheControl: "3600", upsert: false, contentType: file.type || `image/${ext}`
   });
   if (error) throw error;
-  const { data } = sb.storage.from(STORAGE_BUCKET).getPublicUrl(path);
-  return data.publicUrl;
+  return path;
+}
+
+// The bucket is private. photo_url holds the object path (older rows hold a
+// full public URL, which photoPath() reduces to its path); images are shown
+// through short-lived signed URLs fetched after each render.
+const signedUrls = new Map();   // path -> { url, exp }
+const signing = new Set();      // paths with a request in flight
+function photoPath(u) {
+  if (!u) return null;
+  const marker = "/object/public/" + STORAGE_BUCKET + "/";
+  const i = u.indexOf(marker);
+  return i >= 0 ? decodeURIComponent(u.slice(i + marker.length).split("?")[0]) : u;
+}
+function photoImg(u) {
+  const path = photoPath(u);
+  if (!path) return "";
+  const hit = signedUrls.get(path);
+  const src = hit && hit.exp > Date.now() ? ` src="${escapeHtml(hit.url)}"` : "";
+  return `<img class="photo" data-photo="${escapeHtml(path)}"${src} alt="">`;
+}
+async function hydratePhotos() {
+  const need = [...new Set($$("img[data-photo]:not([src])").map(i => i.dataset.photo))].filter(p => !signing.has(p));
+  if (!need.length || !sb) return;
+  need.forEach(p => signing.add(p));
+  const { data } = await sb.storage.from(STORAGE_BUCKET).createSignedUrls(need, 3600);
+  need.forEach(p => signing.delete(p));
+  (data || []).forEach(d => { if (d.signedUrl) signedUrls.set(d.path, { url: d.signedUrl, exp: Date.now() + 50 * 60 * 1000 }); });
+  $$("img[data-photo]:not([src])").forEach(img => {
+    const hit = signedUrls.get(img.dataset.photo);
+    if (hit) img.src = hit.url;
+  });
 }
 
 /* =====================================================================
@@ -1526,6 +1576,7 @@ function renderAll() {
   if (state.view === "harvest")   renderHarvest();
   if (state.view === "contam")    renderContam();
   if (state.view === "calendar")  renderCalendar();
+  hydratePhotos();
 }
 
 /* ---------- dashboard ---------- */
@@ -1709,7 +1760,7 @@ function renderTubBody() {
             obs.map(o => `
               <div class="row">
                 <div class="ts mono">${fmtDate(o.timestamp)}<br><span class="muted">${fmtTime(o.timestamp)}</span></div>
-                ${o.photo_url ? `<img class="photo" src="${escapeHtml(o.photo_url)}" alt="">` : ""}
+                ${photoImg(o.photo_url)}
                 <div class="text">${escapeHtml(o.note || "")}</div>
                 <div class="actions"><button class="btn ghost sm" data-del-obs="${o.id}">Delete</button></div>
               </div>`).join("")}
@@ -1723,7 +1774,7 @@ function renderTubBody() {
               return `
               <div class="row">
                 <div class="ts mono">${fmtDate(h.harvest_date)}<br><span class="muted">F${h.flush_number}</span></div>
-                ${h.photo_url ? `<img class="photo" src="${escapeHtml(h.photo_url)}" alt="">` : ""}
+                ${photoImg(h.photo_url)}
                 <div class="text">
                   <b>${(h.wet_weight_g||0).toFixed(0)}g wet</b>${h.dry_weight_g ? ` → <b>${(h.dry_weight_g).toFixed(0)}g dry</b>` : ""}
                   ${moist !== null ? `<span class="chip mono" style="margin-left:8px;">${moist}% moisture loss</span>` : ""}
@@ -1763,7 +1814,7 @@ function renderTubBody() {
             cont.map(c => `
               <div class="row">
                 <div class="ts mono">${fmtDate(c.detected_at)}</div>
-                ${c.photo_url ? `<img class="photo" src="${escapeHtml(c.photo_url)}" alt="">` : ""}
+                ${photoImg(c.photo_url)}
                 <div class="text">
                   <span class="chip ${c.type === "green" ? "green" : c.type === "black" ? "" : c.type === "pink" ? "red" : "amber"}">${escapeHtml(c.type || "other")}</span>
                   <div class="muted" style="margin-top:4px;">${escapeHtml(c.action_taken || c.notes || "")}</div>
@@ -1936,7 +1987,7 @@ function openHarvestModal(t = null) {
         if (!tid || isNaN(wet)) { toast("Need tub + wet weight", "err"); return; }
         const btn = $("#saveH"); btn.disabled = true; btn.textContent = "Saving…";
         let photoUrl = null;
-        try { if (file) photoUrl = await uploadPhoto(file, `harvest/`); }
+        try { if (file) photoUrl = await uploadPhoto(file, "harvest"); }
         catch (e) { toast("Photo upload failed: " + e.message, "err", 4000); btn.disabled = false; btn.textContent = "Save"; return; }
         const row = {
           id: uid(), tub_id: tid, flush_number,
@@ -1985,7 +2036,7 @@ function openContamModal(t = null) {
         if (!tid) return;
         const btn = $("#saveC"); btn.disabled = true; btn.textContent = "Saving…";
         let photoUrl = null;
-        try { if (file) photoUrl = await uploadPhoto(file, `contam/`); }
+        try { if (file) photoUrl = await uploadPhoto(file, "contam"); }
         catch (e) { toast("Photo upload failed: " + e.message, "err", 4000); btn.disabled = false; btn.textContent = "Save"; return; }
         const row = { id: uid(), tub_id: tid, detected_at: new Date().toISOString(), type, action_taken, notes, photo_url: photoUrl };
         mutate(
@@ -2073,7 +2124,7 @@ function renderHarvest() {
       return `
         <div class="row">
           <div class="ts mono">${fmtDate(h.harvest_date)}<br><span class="muted">T${tub?tub.tub_number:"?"}·F${h.flush_number}</span></div>
-          ${h.photo_url ? `<img class="photo" src="${escapeHtml(h.photo_url)}" alt="">` : ""}
+          ${photoImg(h.photo_url)}
           <div class="text">
             <b>${(h.wet_weight_g||0).toFixed(0)}g wet</b>${h.dry_weight_g ? ` → <b>${(h.dry_weight_g).toFixed(0)}g dry</b>` : ""}
             ${moist !== null ? `<span class="chip mono" style="margin-left:8px;">${moist}% moisture loss</span>` : ""}
@@ -2094,7 +2145,7 @@ function renderContam() {
       return `
         <div class="row">
           <div class="ts mono">${fmtDate(c.detected_at)}<br><span class="muted">T${tub?tub.tub_number:"?"}</span></div>
-          ${c.photo_url ? `<img class="photo" src="${escapeHtml(c.photo_url)}" alt="">` : ""}
+          ${photoImg(c.photo_url)}
           <div class="text">
             <span class="chip ${c.type === "green" ? "green" : c.type === "pink" ? "red" : c.type === "black" ? "" : "amber"}">${escapeHtml(c.type || "other")}</span>
             ${c.action_taken ? `<div style="margin-top:4px;"><b>Action:</b> ${escapeHtml(c.action_taken)}</div>` : ""}
@@ -2171,19 +2222,75 @@ function renderCalendar() {
 /* =====================================================================
    STARTUP
 ===================================================================== */
-async function start() {
-  loadQueue();
-  if (!initSupabase()) return;
+let booted = false;
+let gateMsg = "";
+
+function showGate() {
+  $("#authGate").style.display = "";
+  document.querySelector("main").style.display = "none";
+  $("#tabs").style.display = "none";
+  $("#signOutBtn").style.display = "none";
+  $("#authMsg").textContent = gateMsg;
+  gateMsg = "";
+  setSync("offline", "Signed out");
+}
+function showApp() {
+  $("#authGate").style.display = "none";
+  document.querySelector("main").style.display = "";
+  $("#tabs").style.display = "";
+  $("#signOutBtn").style.display = "";
+}
+
+async function bootData() {
+  if (booted) return;           // SIGNED_IN also fires on token refresh / tab focus
+  booted = true;
+  showApp();
   try {
     const ok = await loadAll();
-    if (!ok) return;             // tables missing or load failed — banner already shown
+    if (!ok) { booted = false; return; }   // tables missing, load failed or no access
     subscribeAll();
     if (state.offlineQueue.length) flushQueue();
   } catch (e) {
+    booted = false;
     setSync("error", "Init failed");
     toast("Init error: " + e.message, "err", 6000);
     console.error(e);
   }
+}
+
+function onSignedOut() {
+  booted = false;
+  channels.forEach(ch => sb.removeChannel(ch));
+  channels = [];
+  state.tubs = []; state.phaseLog = []; state.observations = []; state.harvests = []; state.contams = [];
+  state.initialized = false;
+  signedUrls.clear();
+  showGate();
+}
+
+$("#authForm").addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const btn = $("#authSubmit");
+  btn.disabled = true; btn.textContent = "Signing in…";
+  $("#authMsg").textContent = "";
+  const { error } = await sb.auth.signInWithPassword({
+    email: $("#authEmail").value.trim(),
+    password: $("#authPassword").value
+  });
+  btn.disabled = false; btn.textContent = "Sign in";
+  if (error) $("#authMsg").textContent = error.message;
+  else $("#authPassword").value = "";
+});
+$("#signOutBtn").addEventListener("click", () => sb.auth.signOut());
+
+function start() {
+  loadQueue();
+  if (!initSupabase()) return;
+  // Fires once on load (INITIAL_SESSION) and on every sign-in / sign-out.
+  // Deferred with setTimeout because Supabase calls must not run inside this callback.
+  sb.auth.onAuthStateChange((_event, session) => {
+    setTimeout(() => { if (session) bootData(); else onSignedOut(); }, 0);
+  });
 }
 start();
 </script>

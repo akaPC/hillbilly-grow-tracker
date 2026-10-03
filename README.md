@@ -2,7 +2,7 @@
 
 A single-file, dark-tactical web app for tracking three Hillbilly cubensis monotubs end-to-end — colonization through reflush — with cross-device sync via Supabase.
 
-**Live demo:** https://michaelcoley.github.io/hillbilly-grow-tracker/
+**Live demo:** https://akapc.github.io/hillbilly-grow-tracker/
 
 No build step. One `index.html`. Open it in a browser. State syncs through Supabase Realtime so the dashboard stays current across phone, tablet, and desktop.
 
@@ -18,7 +18,8 @@ No build step. One `index.html`. Open it in a browser. State syncs through Supab
 - **Calendar View** — visual 6-phase timeline per tub with current-position marker and projected pin / harvest / reflush dates based on each tub's spawn-to-bulk date.
 - **Real-time sync** — Supabase Realtime subscriptions on all five tables; another device's update reflects on yours instantly.
 - **Offline support** — writes queue to `localStorage` when offline and flush automatically on reconnect; optimistic UI with rollback on error.
-- **Photos** — uploaded to a public-read Supabase Storage bucket (`grow-photos`); URLs persist in the row.
+- **Sign-in required** — nothing loads until you sign in; only emails you allow-list can read or write.
+- **Photos** — uploaded to a private Supabase Storage bucket (`grow-photos`) and shown through short-lived signed links.
 
 ---
 
@@ -39,12 +40,24 @@ No build step. One `index.html`. Open it in a browser. State syncs through Supab
 
 - five tables: `tubs`, `phase_log`, `observations`, `harvests`, `contamination_events`
 - a `touch_updated_at` trigger on `tubs`
-- **RLS enabled** on every table, with four policies per table granting the `anon` role full read / insert / update / delete (the project anon key is required to reach any of them — public requests without the key are rejected by PostgREST)
+- an `allowed_emails` table and an `is_allowed()` check
+- **RLS enabled** on every table, with one policy per table that grants access only to signed-in users whose email is in `allowed_emails`
 - the `supabase_realtime` publication, with all five tables added so Realtime broadcasts changes
-- a public-read `grow-photos` Storage bucket plus four `storage.objects` policies (public read, anon insert/update/delete scoped to that bucket)
+- a **private** `grow-photos` Storage bucket with the same allow-list policy
 - a seed insert of three tub rows so the dashboard renders on first load
 
-### 3. Wire credentials into `index.html`
+### 3. Create your login
+
+1. **Authentication → Users → Add user**: enter your email and a password.
+2. **SQL Editor**: allow that email (run once per person you want to give access):
+
+   ```sql
+   insert into public.allowed_emails values ('you@example.com');
+   ```
+
+3. **Authentication → Sign In / Providers**: turn off **Allow new users to sign up**.
+
+### 4. Wire credentials into `index.html`
 
 1. In Supabase: **Project Settings → API** → copy the **Project URL** and **anon public** key.
 2. Open `index.html` and edit the constants near the top of the `<script>` block:
@@ -55,13 +68,13 @@ No build step. One `index.html`. Open it in a browser. State syncs through Supab
    const STORAGE_BUCKET    = "grow-photos";
    ```
 
-3. Save. Reload the page. The sync pill in the top-right should turn green and read **Synced**.
+3. Save. Reload the page and sign in. The sync pill in the top-right should turn green and read **Synced**.
 
 ---
 
 ## Deploying
 
-Already deployed via GitHub Pages from the `main` branch root → <https://michaelcoley.github.io/hillbilly-grow-tracker/>.
+Already deployed via GitHub Pages from the `main` branch root → <https://akapc.github.io/hillbilly-grow-tracker/>.
 
 To deploy your own fork: **Settings → Pages → Build and deployment → Source: Deploy from a branch → Branch: `main` / root → Save.**
 
@@ -71,15 +84,10 @@ Because `index.html` is a single static file with no build step, that's the enti
 
 ## Security notes
 
-This app uses **basic RLS** — every table grants the `anon` role full CRUD. Net effect:
-
-- Anyone with the project's anon key can read and write all rows.
-- Requests without the anon key (e.g., curl against the REST endpoint with no `apikey` header) are rejected by PostgREST.
-- This is appropriate for a personal grow tracker. **Do not use this schema for multi-user data, anything sensitive, or anything you'd be unhappy seeing public if the URL leaks.**
-- Treat the anon key as semi-private. If it leaks, rotate it from **Project Settings → API → Reset anon key**, then update `index.html`.
-- Photos go into a public-read bucket — anyone with a URL can view them. Don't upload anything you wouldn't want public.
-
-If you fork this repo: **never commit a populated `index.html` containing your URL + anon key to a public repo for a project you don't want random scraper traffic against.** A safer pattern is to keep credentials in a separate file ignored by git and read them at startup.
+- The anon key in `index.html` is public by design. On its own it grants nothing: every table and the photo bucket require a signed-in user whose email is in `allowed_emails`.
+- Keep sign-ups turned off. Even if someone did create an account, they would see no data unless you add their email to `allowed_emails`.
+- Photos are private. The app requests signed links that expire after an hour.
+- **Upgrading an older install:** earlier versions of `schema.sql` gave the `anon` role full access and made the photo bucket public. Re-run the current `schema.sql`, then do step 3 above. Photos uploaded before the upgrade keep working; their old public links stop working.
 
 ---
 
@@ -88,7 +96,7 @@ If you fork this repo: **never commit a populated `index.html` containing your U
 ```
 hillbilly-grow-tracker/
 ├── index.html      # the entire app — HTML, CSS, JS, Supabase client via CDN
-├── schema.sql      # tables + RLS + Realtime publication + storage bucket + storage policies
+├── schema.sql      # tables + allow-list RLS + Realtime publication + private storage bucket
 ├── README.md       # this file
 └── .gitignore      # excludes .env and other secrets
 ```
